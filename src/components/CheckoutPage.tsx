@@ -563,7 +563,16 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       // Handle error event
       applePay.on('error', (err: any) => {
         console.error('Apple Pay error:', err);
-        setError(err.message || 'Error con Apple Pay');
+        const errorMessage = err.message || 'Error con Apple Pay';
+        
+        // Provide more helpful error messages
+        if (errorMessage.includes('certificate') || errorMessage.includes('Certificate')) {
+          setError('Erro na configuração dos certificados do Apple Pay. Verifique se os certificados estão configurados corretamente no painel do Recurly.');
+        } else if (errorMessage.includes('gateway') || errorMessage.includes('Gateway')) {
+          setError('Erro na configuração do gateway. Verifique se o Stripe está configurado corretamente no Recurly.');
+        } else {
+          setError(`Erro no Apple Pay: ${errorMessage}`);
+        }
         setIsLoading(false);
       });
 
@@ -571,12 +580,21 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       applePay.on('unavailable', () => {
         console.log('Apple Pay is unavailable on this device/browser');
         setApplePayAvailable(false);
-        setError('Apple Pay não está disponível neste dispositivo ou navegador.');
+        setError('Apple Pay não está disponível neste dispositivo ou navegador. Use o Safari em um dispositivo Apple para usar Apple Pay.');
       });
 
     } catch (err: any) {
       console.error('Error initializing Apple Pay:', err);
-      setError(`Error inicializando Apple Pay: ${err?.message || 'Unknown error'}`);
+      const errorMsg = err?.message || 'Unknown error';
+      
+      // More specific error messages
+      if (errorMsg.includes('certificate')) {
+        setError('Erro ao configurar Apple Pay: Verifique se os certificados estão configurados no painel do Recurly.');
+      } else if (errorMsg.includes('gateway')) {
+        setError('Erro ao configurar Apple Pay: Verifique se o gateway Stripe está habilitado no Recurly.');
+      } else {
+        setError(`Erro ao inicializar Apple Pay: ${errorMsg}. Verifique a configuração no painel do Recurly.`);
+      }
     }
 
     return () => {
@@ -605,14 +623,29 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
     const amount = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
 
     try {
-      // Create Google Pay instance
-      // Log to understand the API structure
-      console.log('Creating GooglePay with config:', { country, currency: 'USD', total: amount.toString() });
-      const googlePay = recurly.GooglePay({
+      // Get Google Merchant ID from environment
+      const googleMerchantId = import.meta.env.VITE_GOOGLE_MERCHANT_ID || 'BCR2DN5T5CXIXF3W';
+      
+      // Create Google Pay instance with Merchant ID
+      console.log('Creating GooglePay with config:', { 
+        country, 
+        currency: 'USD', 
+        total: amount.toString(),
+        merchantId: googleMerchantId
+      });
+      
+      const googlePayConfig: any = {
         country: country,
         currency: 'USD',
         total: amount.toString(),
-      });
+      };
+      
+      // Add merchant ID if available (some Recurly.js versions may require it)
+      if (googleMerchantId) {
+        googlePayConfig.merchantId = googleMerchantId;
+      }
+      
+      const googlePay = recurly.GooglePay(googlePayConfig);
 
       console.log('GooglePay instance created:', googlePay);
       console.log('GooglePay methods:', Object.keys(googlePay));
@@ -622,6 +655,12 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       // Handle ready event FIRST - the button can only be attached when ready
       googlePay.on('ready', () => {
         console.log('Google Pay ready - attempting to attach button');
+        console.log('GooglePay state when ready:', {
+          _ready: googlePay._ready,
+          config: googlePay.config,
+          options: googlePay.options,
+          methods: Object.keys(googlePay)
+        });
         
         // Now try to attach the button
         if (googlePayButtonRef.current && googlePayButtonRef.current.id) {
@@ -633,27 +672,51 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
           if (typeof googlePay.attach === 'function') {
             googlePay.attach(selector);
             console.log('GooglePay attached successfully');
+            setError(null); // Clear any previous errors
           } else if (typeof googlePay.mount === 'function') {
             googlePay.mount(selector);
             console.log('GooglePay mounted successfully');
+            setError(null);
           } else if (typeof googlePay.render === 'function') {
             googlePay.render(selector);
             console.log('GooglePay rendered successfully');
-          } else if (googlePay.recurly && typeof googlePay.recurly === 'object') {
-            // Maybe it's through the recurly instance
-            console.log('Checking recurly instance for attach method');
-            const recurlyInstance = googlePay.recurly;
-            if (typeof recurlyInstance.attach === 'function') {
-              recurlyInstance.attach(selector);
-            } else {
-              console.warn('No attach method found in recurly instance');
-              // Try to manually create button or use alternative approach
-              setError('Google Pay está disponível, mas há um problema na inicialização. Tente novamente ou use outro método.');
-            }
+            setError(null);
           } else {
-            console.warn('No attach/mount/render method found. GooglePay might work differently.');
-            // Some APIs auto-render when ready - check if button appears automatically
-            console.log('Waiting to see if GooglePay renders automatically...');
+            // No attach method found - this might be an API version issue
+            console.error('GooglePay ready but no attach/mount/render method available');
+            console.error('GooglePay object:', googlePay);
+            console.error('Available properties:', Object.keys(googlePay));
+            console.error('This might indicate:');
+            console.error('1. The Recurly.js API version might use a different method name');
+            console.error('2. Google Pay might auto-render when ready');
+            console.error('3. The button might need to be created differently');
+            
+            // Check if GooglePay has any method that might work
+            const possibleMethods = ['create', 'build', 'init', 'setup', 'initialize'];
+            let foundMethod = false;
+            
+            for (const method of possibleMethods) {
+              if (typeof googlePay[method] === 'function') {
+                console.log(`Found possible method: ${method}`);
+                foundMethod = true;
+                try {
+                  // Try to use the method
+                  const result = googlePay[method](googlePayButtonRef.current);
+                  if (result) {
+                    console.log(`Method ${method} executed successfully`);
+                    setError(null);
+                    break;
+                  }
+                } catch (e) {
+                  console.warn(`Method ${method} failed:`, e);
+                }
+              }
+            }
+            
+            if (!foundMethod) {
+              // More helpful error message - since Google Pay is enabled
+              setError('Google Pay está configurado, mas a API do Recurly.js pode estar usando um método diferente. Verifique o console para mais detalhes. Se o problema persistir, entre em contato com o suporte do Recurly informando que o Google Pay está habilitado mas o método attach não está disponível.');
+            }
           }
         }
       });
@@ -668,7 +731,16 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       // Handle error event
       googlePay.on('error', (err: any) => {
         console.error('Google Pay error:', err);
-        setError(err.message || 'Error con Google Pay');
+        const errorMessage = err.message || 'Error con Google Pay';
+        
+        // Provide more helpful error messages
+        if (errorMessage.includes('merchant') || errorMessage.includes('Merchant')) {
+          setError('Erro na configuração do Google Merchant ID. Verifique se o ID está correto no painel do Recurly.');
+        } else if (errorMessage.includes('gateway') || errorMessage.includes('Gateway')) {
+          setError('Erro na configuração do gateway. Verifique se o Stripe está configurado corretamente no Recurly.');
+        } else {
+          setError(`Erro no Google Pay: ${errorMessage}`);
+        }
         setIsLoading(false);
       });
 
@@ -681,7 +753,16 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
 
     } catch (err: any) {
       console.error('Error initializing Google Pay:', err);
-      setError(`Error inicializando Google Pay: ${err?.message || 'Unknown error'}`);
+      const errorMsg = err?.message || 'Unknown error';
+      
+      // More specific error messages
+      if (errorMsg.includes('merchant') || errorMsg.includes('Merchant')) {
+        setError('Erro ao configurar Google Pay: Verifique o Google Merchant ID no painel do Recurly.');
+      } else if (errorMsg.includes('gateway')) {
+        setError('Erro ao configurar Google Pay: Verifique se o gateway Stripe está habilitado no Recurly.');
+      } else {
+        setError(`Erro ao inicializar Google Pay: ${errorMsg}. Verifique a configuração no painel do Recurly.`);
+      }
     }
 
     return () => {
