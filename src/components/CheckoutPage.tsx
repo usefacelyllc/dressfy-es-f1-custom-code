@@ -527,29 +527,22 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
 
       applePayInstanceRef.current = applePay;
 
-      // Handle ready event FIRST - the button can only be attached when ready
-      applePay.on('ready', () => {
-        console.log('Apple Pay ready - attempting to attach button');
+      // Handle ready event - the callback receives the button element directly!
+      // According to Recurly.js v4 docs, the 'ready' event callback receives the button element
+      applePay.on('ready', (applePayButton: HTMLElement) => {
+        console.log('Apple Pay ready - received button element:', applePayButton);
         
-        // Now try to attach the button
-        if (applePayButtonRef.current && applePayButtonRef.current.id) {
-          const selector = `#${applePayButtonRef.current.id}`;
-          console.log('Attempting to attach ApplePay to:', selector);
+        // Clear container first
+        if (applePayButtonRef.current) {
+          applePayButtonRef.current.innerHTML = '';
           
-          if (typeof applePay.attach === 'function') {
-            applePay.attach(selector);
-            console.log('ApplePay attached successfully');
-          } else if (typeof applePay.mount === 'function') {
-            applePay.mount(selector);
-            console.log('ApplePay mounted successfully');
-          } else if (typeof applePay.render === 'function') {
-            applePay.render(selector);
-            console.log('ApplePay rendered successfully');
-          } else {
-            console.warn('No attach/mount/render method found for ApplePay');
-            console.log('ApplePay object:', applePay);
-            setError('Apple Pay está disponível, mas há um problema na inicialização. Tente novamente ou use outro método.');
-          }
+          // Append the button element to our container
+          applePayButtonRef.current.appendChild(applePayButton);
+          console.log('ApplePay button appended successfully!');
+          setError(null); // Clear any previous errors
+        } else {
+          console.error('ApplePay button container not found');
+          setError('Erro: Container do botão Apple Pay não encontrado.');
         }
       });
 
@@ -640,9 +633,11 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
         total: amount.toString(),
       };
       
-      // Add merchant ID if available (some Recurly.js versions may require it)
+      // Add merchant ID if available
       if (googleMerchantId) {
         googlePayConfig.merchantId = googleMerchantId;
+        // Also try googleMerchantId (some versions use this name)
+        googlePayConfig.googleMerchantId = googleMerchantId;
       }
       
       const googlePay = recurly.GooglePay(googlePayConfig);
@@ -652,72 +647,22 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       
       googlePayInstanceRef.current = googlePay;
 
-      // Handle ready event FIRST - the button can only be attached when ready
-      googlePay.on('ready', () => {
-        console.log('Google Pay ready - attempting to attach button');
-        console.log('GooglePay state when ready:', {
-          _ready: googlePay._ready,
-          config: googlePay.config,
-          options: googlePay.options,
-          methods: Object.keys(googlePay)
-        });
+      // Handle ready event - the callback receives the button element directly!
+      // According to Recurly.js v4 docs, the 'ready' event callback receives the button element
+      googlePay.on('ready', (googlePayButton: HTMLElement) => {
+        console.log('Google Pay ready - received button element:', googlePayButton);
         
-        // Now try to attach the button
-        if (googlePayButtonRef.current && googlePayButtonRef.current.id) {
-          const selector = `#${googlePayButtonRef.current.id}`;
-          console.log('Attempting to attach GooglePay to:', selector);
+        // Clear container first
+        if (googlePayButtonRef.current) {
+          googlePayButtonRef.current.innerHTML = '';
           
-          // Check if there's a method to attach/render
-          // The API might be different - check for common patterns
-          if (typeof googlePay.attach === 'function') {
-            googlePay.attach(selector);
-            console.log('GooglePay attached successfully');
-            setError(null); // Clear any previous errors
-          } else if (typeof googlePay.mount === 'function') {
-            googlePay.mount(selector);
-            console.log('GooglePay mounted successfully');
-            setError(null);
-          } else if (typeof googlePay.render === 'function') {
-            googlePay.render(selector);
-            console.log('GooglePay rendered successfully');
-            setError(null);
-          } else {
-            // No attach method found - this might be an API version issue
-            console.error('GooglePay ready but no attach/mount/render method available');
-            console.error('GooglePay object:', googlePay);
-            console.error('Available properties:', Object.keys(googlePay));
-            console.error('This might indicate:');
-            console.error('1. The Recurly.js API version might use a different method name');
-            console.error('2. Google Pay might auto-render when ready');
-            console.error('3. The button might need to be created differently');
-            
-            // Check if GooglePay has any method that might work
-            const possibleMethods = ['create', 'build', 'init', 'setup', 'initialize'];
-            let foundMethod = false;
-            
-            for (const method of possibleMethods) {
-              if (typeof googlePay[method] === 'function') {
-                console.log(`Found possible method: ${method}`);
-                foundMethod = true;
-                try {
-                  // Try to use the method
-                  const result = googlePay[method](googlePayButtonRef.current);
-                  if (result) {
-                    console.log(`Method ${method} executed successfully`);
-                    setError(null);
-                    break;
-                  }
-                } catch (e) {
-                  console.warn(`Method ${method} failed:`, e);
-                }
-              }
-            }
-            
-            if (!foundMethod) {
-              // More helpful error message - since Google Pay is enabled
-              setError('Google Pay está configurado, mas a API do Recurly.js pode estar usando um método diferente. Verifique o console para mais detalhes. Se o problema persistir, entre em contato com o suporte do Recurly informando que o Google Pay está habilitado mas o método attach não está disponível.');
-            }
-          }
+          // Append the button element to our container
+          googlePayButtonRef.current.appendChild(googlePayButton);
+          console.log('GooglePay button appended successfully!');
+          setError(null); // Clear any previous errors
+        } else {
+          console.error('GooglePay button container not found');
+          setError('Erro: Container do botão Google Pay não encontrado.');
         }
       });
 
