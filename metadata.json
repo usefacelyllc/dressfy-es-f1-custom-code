@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Copy of Preparação [Dressfy-ES] [F1] [STP-Equity] v2",
+  "description": "The landing page for the Dressfy quiz, which offers a personalized plan based on facial analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
