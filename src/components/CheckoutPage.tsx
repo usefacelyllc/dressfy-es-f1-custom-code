@@ -27,6 +27,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   // Detect user's country from timezone
   const detectUserCountry = (): string => {
     try {
+      //
       // Try to get country from timezone
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       // Map common timezones to countries
