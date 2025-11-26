@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuiz } from '../context/QuizContext';
 
 interface CheckoutPageProps {
@@ -11,6 +11,10 @@ interface CheckoutPageProps {
 declare global {
   interface Window {
     recurly?: any;
+    ApplePaySession?: {
+      canMakePayments(): boolean;
+      new(request: any): any;
+    };
   }
 }
 
@@ -58,6 +62,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recurlyLoaded, setRecurlyLoaded] = useState(false);
+  const [applePayAvailable, setApplePayAvailable] = useState(false);
+  const [googlePayAvailable, setGooglePayAvailable] = useState(false);
   
   // Recurly elements refs
   const cardNumberRef = useRef<HTMLDivElement>(null);
@@ -69,6 +75,10 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   const cardMonthElementRef = useRef<any>(null);
   const cardYearElementRef = useRef<any>(null);
   const cardCvvElementRef = useRef<any>(null);
+  const applePayButtonRef = useRef<HTMLDivElement>(null);
+  const googlePayButtonRef = useRef<HTMLDivElement>(null);
+  const applePayInstanceRef = useRef<any>(null);
+  const googlePayInstanceRef = useRef<any>(null);
 
   // Initialize data from context - watch for changes
   useEffect(() => {
@@ -89,6 +99,11 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       }
     }
   }, [quizData.name, quizData.email]); // Watch for changes in quizData
+
+  // Clear error when payment method changes
+  useEffect(() => {
+    setError(null);
+  }, [paymentMethod]);
 
   // Load Recurly.js script - check if already loaded
   useEffect(() => {
@@ -388,6 +403,298 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
     };
   }, [recurlyLoaded, paymentMethod]);
 
+  // Helper function to process payment tokens (used by both Apple Pay and Google Pay)
+  const processPaymentToken = useCallback((token: any, method: 'applepay' | 'googlepay') => {
+    if (token && token.id) {
+      // Extract numeric value from price string (e.g., "$5.00" -> 5.00)
+      const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
+      const trialAmountNumber = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
+      
+      // Prepare payload for backend API
+      const payload = {
+        tokenId: token.id,
+        customerEmail: email.trim(),
+        customerName: `${firstName.trim()} ${lastName.trim()}`,
+        trialAmount: trialAmountNumber,
+        trialDays: 7, // Fixed 7 days trial
+      };
+
+      // POST to backend API
+      fetch('https://backend-hub-api-ten.vercel.app/api/checkout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const errorData = await res.json().catch(() => ({ error: 'Error del servidor' }));
+            throw new Error(errorData.error || 'Error al procesar el pago');
+          }
+          return res.json();
+        })
+        .then((data) => {
+          // Save to context
+          updateQuizData({ 
+            selectedPrice: selectedPrice || quizData.selectedPrice,
+            name: `${firstName.trim()} ${lastName.trim()}`,
+            email: email.trim()
+          });
+          // Call success callback
+          onSuccess();
+        })
+        .catch((err) => {
+          console.error('Checkout error:', err);
+          setError(err.message || 'Error al procesar el pago');
+          setIsLoading(false);
+        });
+    } else {
+      setError('No se pudo generar el token de pago');
+      setIsLoading(false);
+    }
+  }, [selectedPrice, quizData.selectedPrice, email, firstName, lastName, updateQuizData, onSuccess]);
+
+  // Check availability of Apple Pay and Google Pay
+  useEffect(() => {
+    if (!recurlyLoaded || !recurlyInstanceRef.current) {
+      return;
+    }
+
+    const recurly = recurlyInstanceRef.current;
+    
+    // Check Apple Pay availability
+    if (recurly.ApplePay && typeof recurly.ApplePay === 'function') {
+      try {
+        const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
+        const amount = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
+        
+        // Check if Apple Pay is available on this device/browser
+        if (window.ApplePaySession && window.ApplePaySession.canMakePayments()) {
+          setApplePayAvailable(true);
+        } else {
+          setApplePayAvailable(false);
+        }
+      } catch (err) {
+        console.log('Apple Pay not available:', err);
+        setApplePayAvailable(false);
+      }
+    } else {
+      setApplePayAvailable(false);
+    }
+
+    // Check Google Pay availability
+    if (recurly.GooglePay && typeof recurly.GooglePay === 'function') {
+      try {
+        // Log the GooglePay function to understand its structure
+        console.log('GooglePay function found:', recurly.GooglePay);
+        // Google Pay is generally available if the API exists
+        // The actual availability will be checked when initializing the button
+        setGooglePayAvailable(true);
+      } catch (err) {
+        console.log('Google Pay not available:', err);
+        setGooglePayAvailable(false);
+      }
+    } else {
+      console.log('GooglePay not found in recurly object. Available methods:', Object.keys(recurly));
+      setGooglePayAvailable(false);
+    }
+  }, [recurlyLoaded, selectedPrice, quizData.selectedPrice]);
+
+  // Initialize Apple Pay button
+  useEffect(() => {
+    if (!recurlyLoaded || !recurlyInstanceRef.current || paymentMethod !== 'applepay' || !applePayAvailable) {
+      return;
+    }
+
+    if (!applePayButtonRef.current) {
+      return;
+    }
+
+    const recurly = recurlyInstanceRef.current;
+    const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
+    const amount = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
+
+    try {
+      // Create Apple Pay instance
+      // According to Recurly docs, ApplePay configuration
+      const applePay = recurly.ApplePay({
+        country: country,
+        currency: 'USD',
+        total: amount.toString(),
+        label: 'Dressfy Subscription',
+      });
+
+      applePayInstanceRef.current = applePay;
+
+      // Handle ready event FIRST - the button can only be attached when ready
+      applePay.on('ready', () => {
+        console.log('Apple Pay ready - attempting to attach button');
+        
+        // Now try to attach the button
+        if (applePayButtonRef.current && applePayButtonRef.current.id) {
+          const selector = `#${applePayButtonRef.current.id}`;
+          console.log('Attempting to attach ApplePay to:', selector);
+          
+          if (typeof applePay.attach === 'function') {
+            applePay.attach(selector);
+            console.log('ApplePay attached successfully');
+          } else if (typeof applePay.mount === 'function') {
+            applePay.mount(selector);
+            console.log('ApplePay mounted successfully');
+          } else if (typeof applePay.render === 'function') {
+            applePay.render(selector);
+            console.log('ApplePay rendered successfully');
+          } else {
+            console.warn('No attach/mount/render method found for ApplePay');
+            console.log('ApplePay object:', applePay);
+            setError('Apple Pay está disponível, mas há um problema na inicialização. Tente novamente ou use outro método.');
+          }
+        }
+      });
+
+      // Handle token event
+      applePay.on('token', (token: any) => {
+        console.log('Apple Pay token received:', token);
+        setIsLoading(true);
+        processPaymentToken(token, 'applepay');
+      });
+
+      // Handle error event
+      applePay.on('error', (err: any) => {
+        console.error('Apple Pay error:', err);
+        setError(err.message || 'Error con Apple Pay');
+        setIsLoading(false);
+      });
+
+      // Also check if ApplePay becomes unavailable
+      applePay.on('unavailable', () => {
+        console.log('Apple Pay is unavailable on this device/browser');
+        setApplePayAvailable(false);
+        setError('Apple Pay não está disponível neste dispositivo ou navegador.');
+      });
+
+    } catch (err: any) {
+      console.error('Error initializing Apple Pay:', err);
+      setError(`Error inicializando Apple Pay: ${err?.message || 'Unknown error'}`);
+    }
+
+    return () => {
+      if (applePayInstanceRef.current) {
+        try {
+          applePayInstanceRef.current.destroy?.();
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+    };
+  }, [recurlyLoaded, paymentMethod, applePayAvailable, country, selectedPrice, quizData.selectedPrice, processPaymentToken]);
+
+  // Initialize Google Pay button
+  useEffect(() => {
+    if (!recurlyLoaded || !recurlyInstanceRef.current || paymentMethod !== 'googlepay' || !googlePayAvailable) {
+      return;
+    }
+
+    if (!googlePayButtonRef.current) {
+      return;
+    }
+
+    const recurly = recurlyInstanceRef.current;
+    const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
+    const amount = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
+
+    try {
+      // Create Google Pay instance
+      // Log to understand the API structure
+      console.log('Creating GooglePay with config:', { country, currency: 'USD', total: amount.toString() });
+      const googlePay = recurly.GooglePay({
+        country: country,
+        currency: 'USD',
+        total: amount.toString(),
+      });
+
+      console.log('GooglePay instance created:', googlePay);
+      console.log('GooglePay methods:', Object.keys(googlePay));
+      
+      googlePayInstanceRef.current = googlePay;
+
+      // Handle ready event FIRST - the button can only be attached when ready
+      googlePay.on('ready', () => {
+        console.log('Google Pay ready - attempting to attach button');
+        
+        // Now try to attach the button
+        if (googlePayButtonRef.current && googlePayButtonRef.current.id) {
+          const selector = `#${googlePayButtonRef.current.id}`;
+          console.log('Attempting to attach GooglePay to:', selector);
+          
+          // Check if there's a method to attach/render
+          // The API might be different - check for common patterns
+          if (typeof googlePay.attach === 'function') {
+            googlePay.attach(selector);
+            console.log('GooglePay attached successfully');
+          } else if (typeof googlePay.mount === 'function') {
+            googlePay.mount(selector);
+            console.log('GooglePay mounted successfully');
+          } else if (typeof googlePay.render === 'function') {
+            googlePay.render(selector);
+            console.log('GooglePay rendered successfully');
+          } else if (googlePay.recurly && typeof googlePay.recurly === 'object') {
+            // Maybe it's through the recurly instance
+            console.log('Checking recurly instance for attach method');
+            const recurlyInstance = googlePay.recurly;
+            if (typeof recurlyInstance.attach === 'function') {
+              recurlyInstance.attach(selector);
+            } else {
+              console.warn('No attach method found in recurly instance');
+              // Try to manually create button or use alternative approach
+              setError('Google Pay está disponível, mas há um problema na inicialização. Tente novamente ou use outro método.');
+            }
+          } else {
+            console.warn('No attach/mount/render method found. GooglePay might work differently.');
+            // Some APIs auto-render when ready - check if button appears automatically
+            console.log('Waiting to see if GooglePay renders automatically...');
+          }
+        }
+      });
+
+      // Handle token event
+      googlePay.on('token', (token: any) => {
+        console.log('Google Pay token received:', token);
+        setIsLoading(true);
+        processPaymentToken(token, 'googlepay');
+      });
+
+      // Handle error event
+      googlePay.on('error', (err: any) => {
+        console.error('Google Pay error:', err);
+        setError(err.message || 'Error con Google Pay');
+        setIsLoading(false);
+      });
+
+      // Also check if GooglePay becomes unavailable
+      googlePay.on('unavailable', () => {
+        console.log('Google Pay is unavailable on this device/browser');
+        setGooglePayAvailable(false);
+        setError('Google Pay não está disponível neste dispositivo ou navegador.');
+      });
+
+    } catch (err: any) {
+      console.error('Error initializing Google Pay:', err);
+      setError(`Error inicializando Google Pay: ${err?.message || 'Unknown error'}`);
+    }
+
+    return () => {
+      if (googlePayInstanceRef.current) {
+        try {
+          googlePayInstanceRef.current.destroy?.();
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+    };
+  }, [recurlyLoaded, paymentMethod, googlePayAvailable, country, selectedPrice, quizData.selectedPrice, processPaymentToken]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -500,17 +807,25 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
         setIsLoading(false);
       }
     } else if (paymentMethod === 'googlepay') {
-      // Google Pay payment
+      // Google Pay payment - handled by button click event
+      if (!googlePayInstanceRef.current) {
+        setError('Google Pay no está disponible en este dispositivo');
+        return;
+      }
       setIsLoading(true);
-      // TODO: Implement Google Pay integration
-      setError('Google Pay estará disponible pronto');
-      setIsLoading(false);
+      setError(null);
+      // The actual payment is triggered by the Google Pay button
+      // The token event handler will process the payment
     } else if (paymentMethod === 'applepay') {
-      // Apple Pay payment
+      // Apple Pay payment - handled by button click event
+      if (!applePayInstanceRef.current) {
+        setError('Apple Pay no está disponible en este dispositivo');
+        return;
+      }
       setIsLoading(true);
-      // TODO: Implement Apple Pay integration
-      setError('Apple Pay estará disponible pronto');
-      setIsLoading(false);
+      setError(null);
+      // The actual payment is triggered by the Apple Pay button
+      // The token event handler will process the payment
     }
   };
 
@@ -863,34 +1178,46 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
             
             {paymentMethod === 'googlepay' && (
               <div className="p-4 bg-gray-50 border-t border-gray-200">
-                <ul className="space-y-3 mb-4">
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Pago rápido y seguro
-                  </li>
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Sin necesidad de ingresar datos de tarjeta
-                  </li>
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Protección adicional de Google Pay
-                  </li>
-                </ul>
-                <button
-                  type="button"
-                  onClick={handleSubmit}
-                  disabled={isLoading}
-                  className="w-full bg-apoio text-complementar py-3 px-6 rounded-lg text-base font-sen font-bold shadow-md transition-all duration-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isLoading ? 'Procesando...' : 'Continuar con Google Pay'}
-                </button>
+                {!googlePayAvailable ? (
+                  <div className="text-center py-4">
+                    <p className="text-sm text-gray-600 mb-2">Google Pay no está disponible en este dispositivo o navegador.</p>
+                    <p className="text-xs text-gray-500">Por favor, use otro método de pago.</p>
+                  </div>
+                ) : (
+                  <>
+                    <ul className="space-y-3 mb-4">
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Pago rápido y seguro
+                      </li>
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Sin necesidad de ingresar datos de tarjeta
+                      </li>
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Protección adicional de Google Pay
+                      </li>
+                    </ul>
+                    <div 
+                      id="recurly-googlepay-button"
+                      ref={googlePayButtonRef}
+                      className="w-full"
+                      style={{ minHeight: '48px' }}
+                    ></div>
+                    {error && paymentMethod === 'googlepay' && (
+                      <div className="mt-3 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
+                        {error}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -923,34 +1250,46 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
             
             {paymentMethod === 'applepay' && (
               <div className="p-4 bg-gray-50 border-t border-gray-200">
-                <ul className="space-y-3 mb-4">
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Pago rápido y seguro
-                  </li>
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Sin necesidad de ingresar datos de tarjeta
-                  </li>
-                  <li className="flex items-center gap-2 text-sm text-gray-700">
-                    <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-                    </svg>
-                    Protección adicional de Apple Pay
-                  </li>
-                </ul>
-                <button
-                  type="button"
-                  onClick={handleSubmit}
-                  disabled={isLoading}
-                  className="w-full bg-apoio text-complementar py-3 px-6 rounded-lg text-base font-sen font-bold shadow-md transition-all duration-300 hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isLoading ? 'Procesando...' : 'Continuar con Apple Pay'}
-                </button>
+                {!applePayAvailable ? (
+                  <div className="text-center py-4">
+                    <p className="text-sm text-gray-600 mb-2">Apple Pay no está disponible en este dispositivo o navegador.</p>
+                    <p className="text-xs text-gray-500">Por favor, use otro método de pago.</p>
+                  </div>
+                ) : (
+                  <>
+                    <ul className="space-y-3 mb-4">
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Pago rápido y seguro
+                      </li>
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Sin necesidad de ingresar datos de tarjeta
+                      </li>
+                      <li className="flex items-center gap-2 text-sm text-gray-700">
+                        <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                        </svg>
+                        Protección adicional de Apple Pay
+                      </li>
+                    </ul>
+                    <div 
+                      id="recurly-applepay-button"
+                      ref={applePayButtonRef}
+                      className="w-full"
+                      style={{ minHeight: '48px' }}
+                    ></div>
+                    {error && paymentMethod === 'applepay' && (
+                      <div className="mt-3 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
+                        {error}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1057,7 +1396,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
                 <input type="hidden" data-recurly="last_name" value={lastName} />
 
                 {/* Error Message */}
-                {error && (
+                {error && paymentMethod === 'card' && (
                   <div className="p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
                     {error}
                   </div>
