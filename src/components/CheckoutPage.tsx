@@ -64,6 +64,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   const [recurlyLoaded, setRecurlyLoaded] = useState(false);
   const [applePayAvailable, setApplePayAvailable] = useState(false);
   const [googlePayAvailable, setGooglePayAvailable] = useState(false);
+  const [show3DSModal, setShow3DSModal] = useState(false);
+  const [threeDSActionTokenId, setThreeDSActionTokenId] = useState<string | null>(null);
   
   // Recurly elements refs
   const cardNumberRef = useRef<HTMLDivElement>(null);
@@ -79,6 +81,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   const googlePayButtonRef = useRef<HTMLDivElement>(null);
   const applePayInstanceRef = useRef<any>(null);
   const googlePayInstanceRef = useRef<any>(null);
+  const threeDSContainerRef = useRef<HTMLDivElement>(null);
+  const threeDSInstanceRef = useRef<any>(null);
 
   // Initialize data from context - watch for changes
   useEffect(() => {
@@ -104,6 +108,16 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
   useEffect(() => {
     setError(null);
   }, [paymentMethod]);
+
+  // Auto-switch to card if selected payment method becomes unavailable
+  useEffect(() => {
+    if (paymentMethod === 'applepay' && recurlyLoaded && !applePayAvailable) {
+      setPaymentMethod('card');
+    }
+    if (paymentMethod === 'googlepay' && recurlyLoaded && !googlePayAvailable) {
+      setPaymentMethod('card');
+    }
+  }, [paymentMethod, recurlyLoaded, applePayAvailable, googlePayAvailable]);
 
   // Load Recurly.js script - check if already loaded
   useEffect(() => {
@@ -466,11 +480,10 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
     // Check Apple Pay availability
     if (recurly.ApplePay && typeof recurly.ApplePay === 'function') {
       try {
-        const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
-        const amount = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
-        
         // Check if Apple Pay is available on this device/browser
         if (window.ApplePaySession && window.ApplePaySession.canMakePayments()) {
+          // Note: We can't check if feature is enabled in Recurly until we try to initialize
+          // The error will be caught in the initialization useEffect
           setApplePayAvailable(true);
         } else {
           setApplePayAvailable(false);
@@ -559,7 +572,12 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
         const errorMessage = err.message || 'Error con Apple Pay';
         
         // Provide more helpful error messages
-        if (errorMessage.includes('certificate') || errorMessage.includes('Certificate')) {
+        if (errorMessage.includes('not enabled') || errorMessage.includes('feature is not enabled')) {
+          // Feature not enabled in Recurly - hide option and switch to card
+          setApplePayAvailable(false);
+          setPaymentMethod('card');
+          setError('Apple Pay no está habilitado en Recurly. Necesita contactar al soporte de Recurly para habilitar la función "Apple Pay Web Payments". Mientras tanto, puede usar el método de pago con tarjeta.');
+        } else if (errorMessage.includes('certificate') || errorMessage.includes('Certificate')) {
           setError('Erro na configuração dos certificados do Apple Pay. Verifique se os certificados estão configurados corretamente no painel do Recurly.');
         } else if (errorMessage.includes('gateway') || errorMessage.includes('Gateway')) {
           setError('Erro na configuração do gateway. Verifique se o Stripe está configurado corretamente no Recurly.');
@@ -581,7 +599,12 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
       const errorMsg = err?.message || 'Unknown error';
       
       // More specific error messages
-      if (errorMsg.includes('certificate')) {
+      if (errorMsg.includes('not enabled') || errorMsg.includes('feature is not enabled')) {
+        // Feature not enabled in Recurly - hide option and switch to card
+        setApplePayAvailable(false);
+        setPaymentMethod('card');
+        setError('Apple Pay no está habilitado para este sitio en la configuración del Recurly. Por favor, use otro método de pago.');
+      } else if (errorMsg.includes('certificate')) {
         setError('Erro ao configurar Apple Pay: Verifique se os certificados estão configurados no painel do Recurly.');
       } else if (errorMsg.includes('gateway')) {
         setError('Erro ao configurar Apple Pay: Verifique se o gateway Stripe está habilitado no Recurly.');
@@ -633,11 +656,12 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
         total: amount.toString(),
       };
       
-      // Add merchant ID if available
+      // Add merchant ID - according to Recurly docs, it should be 'googleMerchantId'
       if (googleMerchantId) {
-        googlePayConfig.merchantId = googleMerchantId;
-        // Also try googleMerchantId (some versions use this name)
         googlePayConfig.googleMerchantId = googleMerchantId;
+        console.log('Google Merchant ID configured:', googleMerchantId);
+      } else {
+        console.warn('Google Merchant ID not found! Please set VITE_GOOGLE_MERCHANT_ID in your .env file');
       }
       
       const googlePay = recurly.GooglePay(googlePayConfig);
@@ -721,6 +745,131 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
     };
   }, [recurlyLoaded, paymentMethod, googlePayAvailable, country, selectedPrice, quizData.selectedPrice, processPaymentToken]);
 
+  // Initialize 3D Secure when action token is available
+  useEffect(() => {
+    if (!show3DSModal || !threeDSActionTokenId || !recurlyLoaded || !recurlyInstanceRef.current) {
+      return;
+    }
+
+    if (!threeDSContainerRef.current) {
+      return;
+    }
+
+    const recurly = recurlyInstanceRef.current;
+    
+    try {
+      // Create Risk instance and ThreeDSecure
+      const risk = recurly.Risk();
+      const threeDSecure = risk.ThreeDSecure({
+        actionTokenId: threeDSActionTokenId,
+      });
+
+      threeDSInstanceRef.current = threeDSecure;
+
+      // Handle successful 3DS authentication
+      threeDSecure.on('token', (token: any) => {
+        console.log('3D Secure token received:', token);
+        
+        if (token && token.id && token.type === 'three_d_secure_action_result') {
+          // Retry the checkout with the 3DS result token
+          const priceString = selectedPrice || quizData.selectedPrice || '$0.00';
+          const trialAmountNumber = parseFloat(priceString.replace(/[^0-9.]/g, '')) || 0;
+          
+          const payload = {
+            tokenId: token.id, // This is the three_d_secure_action_result token
+            customerEmail: email.trim(),
+            customerName: `${firstName.trim()} ${lastName.trim()}`,
+            trialAmount: trialAmountNumber,
+            trialDays: 7,
+          };
+
+          setIsLoading(true);
+          
+          // POST to backend API with 3DS result
+          fetch('https://backend-hub-api-ten.vercel.app/api/checkout', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          })
+            .then(async (res) => {
+              if (!res.ok) {
+                const errorData = await res.json().catch(() => ({ error: 'Error del servidor' }));
+                throw new Error(errorData.error || 'Error al procesar el pago');
+              }
+              return res.json();
+            })
+            .then((data) => {
+              // Close 3DS modal
+              setShow3DSModal(false);
+              setThreeDSActionTokenId(null);
+              
+              // Save to context
+              updateQuizData({ 
+                selectedPrice: selectedPrice || quizData.selectedPrice,
+                name: `${firstName.trim()} ${lastName.trim()}`,
+                email: email.trim()
+              });
+              // Call success callback
+              onSuccess();
+            })
+            .catch((err) => {
+              console.error('Checkout error after 3DS:', err);
+              setError(err.message || 'Error al procesar el pago após autenticação 3D Secure');
+              setIsLoading(false);
+              setShow3DSModal(false);
+              setThreeDSActionTokenId(null);
+            });
+        }
+      });
+
+      // Handle 3DS errors
+      threeDSecure.on('error', (err: any) => {
+        console.error('3D Secure error:', err);
+        setError(`Erro na autenticação 3D Secure: ${err.message || 'Erro desconhecido'}`);
+        setIsLoading(false);
+        setShow3DSModal(false);
+        setThreeDSActionTokenId(null);
+      });
+
+      // Attach 3DS to container - must be called from user-initiated event
+      // Since the modal is shown after user clicks submit, we can attach immediately
+      // But we'll use requestAnimationFrame to ensure DOM is ready
+      requestAnimationFrame(() => {
+        if (threeDSContainerRef.current) {
+          try {
+            threeDSecure.attach(threeDSContainerRef.current);
+            console.log('3D Secure attached to container');
+          } catch (attachErr: any) {
+            console.error('Error attaching 3DS:', attachErr);
+            setError(`Erro ao iniciar autenticação 3D Secure: ${attachErr?.message || 'Erro desconhecido'}`);
+            setIsLoading(false);
+            setShow3DSModal(false);
+            setThreeDSActionTokenId(null);
+          }
+        }
+      });
+
+    } catch (err: any) {
+      console.error('Error initializing 3D Secure:', err);
+      setError(`Erro ao inicializar autenticação 3D Secure: ${err?.message || 'Erro desconhecido'}`);
+      setIsLoading(false);
+      setShow3DSModal(false);
+      setThreeDSActionTokenId(null);
+    }
+
+    return () => {
+      if (threeDSInstanceRef.current) {
+        try {
+          threeDSInstanceRef.current.remove?.();
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
+    };
+  }, [show3DSModal, threeDSActionTokenId, recurlyLoaded, selectedPrice, quizData.selectedPrice, email, firstName, lastName, updateQuizData, onSuccess]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -801,13 +950,45 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
               body: JSON.stringify(payload),
             })
               .then(async (res) => {
+                const responseData = await res.json().catch(() => ({ error: 'Error del servidor' }));
+                
+                console.log('Backend response:', { status: res.status, data: responseData });
+                
                 if (!res.ok) {
-                  const errorData = await res.json().catch(() => ({ error: 'Error del servidor' }));
-                  throw new Error(errorData.error || 'Error al procesar el pago');
+                  // Check if it's a 3D Secure error
+                  // Recurly may return different error formats
+                  const errorCode = responseData.error_code || responseData.code || responseData.type;
+                  const actionTokenId = responseData.three_d_secure_action_token_id || 
+                                       responseData.action_token_id ||
+                                       responseData.three_d_secure_action_token?.id;
+                  
+                  console.log('Error details:', { 
+                    errorCode, 
+                    actionTokenId,
+                    fullResponse: responseData 
+                  });
+                  
+                  if (errorCode === 'three_d_secure_action_required' || 
+                      errorCode === 'requires_3d_secure' ||
+                      errorCode === 'requires_action' ||
+                      actionTokenId) {
+                    // Start 3D Secure flow
+                    if (actionTokenId) {
+                      console.log('3D Secure required, action token:', actionTokenId);
+                      setThreeDSActionTokenId(actionTokenId);
+                      setShow3DSModal(true);
+                      setIsLoading(false);
+                      return;
+                    } else {
+                      console.warn('3D Secure error detected but no action token provided');
+                    }
+                  }
+                  throw new Error(responseData.error || responseData.message || 'Error al procesar el pago');
                 }
-                return res.json();
+                return responseData;
               })
               .then((data) => {
+                // If we get here, payment was successful
                 // Save to context
                 updateQuizData({ 
                   selectedPrice: selectedPrice || quizData.selectedPrice,
@@ -1170,7 +1351,8 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
           </div>
 
           {/* Payment Options Section */}
-          {/* Google Pay Option */}
+          {/* Google Pay Option - Only show if available or if Recurly hasn't loaded yet */}
+          {(googlePayAvailable || !recurlyLoaded) && (
           <div className={`mb-4 border border-gray-200 rounded-xl overflow-hidden ${
             paymentMethod === 'googlepay' ? '' : 'bg-white'
           }`}>
@@ -1247,8 +1429,10 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
               </div>
             )}
           </div>
+          )}
 
-          {/* Apple Pay Option */}
+          {/* Apple Pay Option - Only show if available or if Recurly hasn't loaded yet */}
+          {(applePayAvailable || !recurlyLoaded) && (
           <div className={`mb-4 border border-gray-200 rounded-xl overflow-hidden ${
             paymentMethod === 'applepay' ? '' : 'bg-white'
           }`}>
@@ -1311,7 +1495,31 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
                     ></div>
                     {error && paymentMethod === 'applepay' && (
                       <div className="mt-3 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
-                        {error}
+                        <p className="font-semibold mb-1">⚠️ Problema con Apple Pay</p>
+                        <p>{error}</p>
+                        {error.includes('no está habilitado') || error.includes('not enabled') ? (
+                          <div className="mt-2 text-xs text-red-600 space-y-1">
+                            <p>Este error requiere configuración en el panel de administración de Recurly.</p>
+                            <p>
+                              <strong>Pasos necesarios:</strong>
+                            </p>
+                            <ol className="list-decimal list-inside ml-2 space-y-1">
+                              <li>Contactar al soporte de Recurly para habilitar "Apple Pay Web Payments"</li>
+                              <li>Configurar los certificados en Configuration → Apple Pay</li>
+                              <li>Ver el archivo GUIA-APPLE-PAY-RECURLY.md para más detalles</li>
+                            </ol>
+                            <p className="mt-2">
+                              <a 
+                                href="https://docs.recurly.com/recurly-subscriptions/docs/apple-pay-on-the-web" 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-blue-600 underline hover:text-blue-800"
+                              >
+                                Ver documentación oficial del Recurly →
+                              </a>
+                            </p>
+                          </div>
+                        ) : null}
                       </div>
                     )}
                   </>
@@ -1319,6 +1527,7 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
               </div>
             )}
           </div>
+          )}
 
           {/* Accordion: Credit Card Option */}
           <div className={`border border-gray-200 rounded-xl overflow-hidden ${
@@ -1459,6 +1668,68 @@ const CheckoutPage: React.FC<CheckoutPageProps> = ({ onBack, selectedPrice, onSu
           </div>
         </div>
       </div>
+
+      {/* 3D Secure Modal */}
+      {show3DSModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+            <div className="mb-4">
+              <h2 className="text-xl font-playfair font-bold text-apoio mb-2">
+                Autenticação de Segurança
+              </h2>
+              <p className="text-sm text-gray-600 font-sen">
+                Para sua segurança, precisamos autenticar seu cartão. Por favor, complete a verificação abaixo.
+              </p>
+            </div>
+            
+            {/* 3D Secure Container - minimum 250x400px as per Recurly docs */}
+            <div 
+              ref={threeDSContainerRef}
+              id="recurly-3ds-container"
+              className="w-full min-h-[400px] border border-gray-200 rounded-lg bg-gray-50 p-4"
+              style={{ minWidth: '250px', minHeight: '400px' }}
+            >
+              {/* Loading state while 3DS initializes */}
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <svg className="animate-spin h-8 w-8 text-apoio mx-auto mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  <p className="text-sm text-gray-600 font-sen">Carregando autenticação...</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Error message in modal */}
+            {error && (
+              <div className="mt-4 p-3 rounded-lg bg-red-50 text-red-700 text-sm border border-red-200">
+                {error}
+              </div>
+            )}
+
+            {/* Cancel button */}
+            <button
+              type="button"
+              onClick={() => {
+                setShow3DSModal(false);
+                setThreeDSActionTokenId(null);
+                setIsLoading(false);
+                if (threeDSInstanceRef.current) {
+                  try {
+                    threeDSInstanceRef.current.remove?.();
+                  } catch (e) {
+                    // Ignore
+                  }
+                }
+              }}
+              className="mt-4 w-full px-4 py-2 text-sm font-sen text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+            >
+              Cancelar
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

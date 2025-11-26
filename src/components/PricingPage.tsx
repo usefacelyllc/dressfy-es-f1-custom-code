@@ -43,7 +43,7 @@ const PricingPage: React.FC<PricingPageProps> = ({ onContinue }) => {
     return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
 
-  const prices = ['$5', '$7.50', '$9', '$13.67'];
+  const prices = ['$0.15', '$7.50', '$9', '$13.67'];
 
   const handlePriceSelection = (price: string) => {
     setSelectedPrice(price);
