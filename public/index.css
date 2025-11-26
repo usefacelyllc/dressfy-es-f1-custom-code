@@ -1,2 +1,35 @@
 /* Estilos globais do projeto */
 
+/* Recurly Elements Styling */
+[id^="recurly-"] {
+  padding: 0 !important;
+  /* Border is set via className in component, don't override */
+}
+
+/* Remove borders from internal Recurly iframes/inputs, but keep container border */
+[id^="recurly-"] iframe {
+  border: none !important;
+  height: 40px !important;
+  width: 100% !important;
+}
+
+[id^="recurly-"] input {
+  border: none !important;
+  height: 40px !important;
+  padding: 8px 12px !important;
+}
+
+/* Ensure container border is visible - override any inline styles */
+[id^="recurly-card-number"],
+[id^="recurly-card-month"],
+[id^="recurly-card-year"],
+[id^="recurly-card-cvv"] {
+  border: 1px solid #E5E7EB !important;
+}
+
+/* Remove focus outline from Recurly elements */
+[id^="recurly-"]:focus-within {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
